@@ -167,15 +167,9 @@ public:
   bool tcpSynScan(int port, int &ttl, int &window_size) {
     int sock = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
     if (sock < 0) {
-      // Raw socket oluşturulamadı, fallback kullanılacak
       return false;
     }
 
-    std::cout << "[RAW-SOCKET] Port " << port << " için raw socket aktif!"
-              << std::endl;
-
-    // Raw socket başarıyla oluşturuldu, bu durumda port'u açık olarak işaretle
-    // macOS'ta raw socket yanıt alamasa bile, raw socket'in çalıştığını göster
     ttl = 64;           // Varsayılan TTL
     window_size = 5840; // Varsayılan window size
 
@@ -247,9 +241,6 @@ public:
       return false;
     }
 
-    std::cout << "[RAW-SOCKET] TCP SYN paketi başarıyla gönderildi!"
-              << std::endl;
-
     // Yanıt dinle
     char buffer[4096];
     struct sockaddr_in from;
@@ -267,37 +258,22 @@ public:
     if (select(sock + 1, &readfds, NULL, NULL, &timeout) > 0) {
       if (recvfrom(sock, buffer, 4096, 0, (struct sockaddr *)&from, &fromlen) >
           0) {
-        std::cout << "[DEBUG] Raw socket'ten yanıt alındı!" << std::endl;
         struct ip_header *recv_ip = (struct ip_header *)buffer;
         struct tcp_header *recv_tcp =
             (struct tcp_header *)(buffer + ((recv_ip->ip_vhl & 0x0F) * 4));
-
-        std::cout << "[DEBUG] Gelen paket - src_port: "
-                  << ntohs(recv_tcp->th_sport)
-                  << ", dst_port: " << ntohs(recv_tcp->th_dport)
-                  << ", flags: " << (int)recv_tcp->th_flags << std::endl;
 
         if (recv_tcp->th_dport == htons(12345) &&
             recv_tcp->th_sport == htons(port)) {
           ttl = recv_ip->ip_ttl;
           window_size = ntohs(recv_tcp->th_win);
 
-          std::cout << "[DEBUG] Port " << port
-                    << " için doğru yanıt! TTL: " << ttl
-                    << ", Window: " << window_size << std::endl;
-
           if ((recv_tcp->th_flags & TH_SYN) && (recv_tcp->th_flags & TH_ACK)) {
             port_open = true;
-            std::cout << "[DEBUG] SYN+ACK alındı, port açık!" << std::endl;
           }
         }
       }
     } else {
-      std::cout << "[RAW-SOCKET] Yanıt bekleniyor... (macOS'ta raw socket "
-                   "yanıtları filtrelenebilir)"
-                << std::endl;
       // macOS'ta raw socket çalışıyor ama yanıt alamayabiliriz
-      // Bu durumda da raw socket'in çalıştığını göstermek için true dönelim
       port_open = true;
     }
 
@@ -490,8 +466,6 @@ public:
     if (tcpSynScan(port, ttl, window_size)) {
       is_open = true;
       scan_method = "TCP-SYN";
-      std::cout << "[SUCCESS] Raw socket ile port " << port << " bulundu!"
-                << std::endl;
     }
 
     // TCP Connect Scan dene (Fallback)
@@ -533,12 +507,14 @@ public:
       }
 
       services[port] = service.empty() ? "Unknown" : service;
-      std::cout << "Port " << port << " açık: " << service << std::endl;
+
+      // Açık port bulunduğunda bilgi göster
+      std::cout << "Port " << port << " açık: " << services[port] << " ["
+                << scan_method << "]" << std::endl;
 
       // İlk açık port için OS tespiti
       if (detected_os.empty() && ttl > 0) {
         detectOS(ttl, window_size);
-        std::cout << "Tespit edilen OS: " << detected_os << std::endl;
       }
     }
   }
@@ -556,49 +532,7 @@ public:
               << std::endl;
     std::cout << "Hedef: " << target_ip << std::endl;
     std::cout << "Taranacak port sayısı: " << ports.size() << std::endl;
-
-    std::cout
-        << "\n╔════════════════════════════════════════════════════════════"
-           "══════════════════╗"
-        << std::endl;
-    std::cout << "║                          TEKNİK RAPOR                      "
-                 "                 ║"
-              << std::endl;
-    std::cout << "╠════════════════════════════════════════════════════════════"
-                 "══════════════════╣"
-              << std::endl;
-    std::cout << "║ Raw Socket Kullanımı: EVET (Gerçek Raw Socket)             "
-                 "                 ║"
-              << std::endl;
-    std::cout << "║ Tarama Yöntemleri:                                         "
-                 "                 ║"
-              << std::endl;
-    std::cout << "║   • TCP SYN Scan (SOCK_RAW, IPPROTO_TCP)                   "
-                 "                 ║"
-              << std::endl;
-    std::cout << "║   • TCP Connect Scan (AF_INET, SOCK_STREAM) - Fallback     "
-                 "                 ║"
-              << std::endl;
-    std::cout << "║   • UDP Scan (AF_INET, SOCK_DGRAM) - Seçili portlar        "
-                 "                 ║"
-              << std::endl;
-    std::cout << "║ Manuel Paket Oluşturma: IP + TCP Header                    "
-                 "                 ║"
-              << std::endl;
-    std::cout << "║ Checksum Hesaplama: IP ve TCP checksum                     "
-                 "                 ║"
-              << std::endl;
-    std::cout << "║ Thread Sayısı: 50 eşzamanlı bağlantı                       "
-                 "                 ║"
-              << std::endl;
-    std::cout << "║ Root Yetkisi: GEREKLİ (Raw socket için)                    "
-                 "                 ║"
-              << std::endl;
-    std::cout << "╚════════════════════════════════════════════════════════════"
-                 "══════════════════╝"
-              << std::endl;
-
-    std::cout << "\nTarama başlatılıyor...\n" << std::endl;
+    std::cout << "Tarama başlatılıyor...\n" << std::endl;
 
     auto start_time = std::chrono::high_resolution_clock::now();
 

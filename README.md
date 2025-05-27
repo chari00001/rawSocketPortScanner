@@ -16,9 +16,10 @@ Bu proje, C++ ve raw socket teknolojisi kullanarak geliştirilmiş kapsamlı bir
 - **Hostname Resolution**: IP adresi ve hostname desteği
 
 ### 🛡️ Servis Tespiti
-- **Banner Grabbing**: Servislerin kendilerini tanıtması
+- **Akıllı Banner Grabbing**: Servislerin kendilerini tanıtması
 - **Bilinen Servis Portları**: 25+ yaygın servis tanımlaması
-- **Özel Protokol Desteği**: HTTP, HTTPS, SSH, FTP, DNS için özelleştirilmiş istekler
+- **Özel Protokol Desteği**: HTTP, HTTPS, SSH, FTP, SMTP, POP3, IMAP için özelleştirilmiş istekler
+- **False Positive Önleme**: Sadece gerçekten tespit edilen servisler gösterilir
 
 ### 📊 Detaylı Raporlama
 - **Tablo Formatı**: Düzenli ve okunabilir çıktı

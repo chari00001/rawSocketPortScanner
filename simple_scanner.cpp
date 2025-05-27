@@ -82,6 +82,7 @@ public:
 
   // TCP Connect Scan
   bool tcpConnectScan(int port) {
+    // Normal socket oluştur (Raw socket DEĞİL)
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0)
       return false;
@@ -101,8 +102,8 @@ public:
       if (errno == EINPROGRESS) {
         fd_set writefds;
         struct timeval timeout;
-        timeout.tv_sec = 2;
-        timeout.tv_usec = 0;
+        timeout.tv_sec = 1;       // Timeout'u azalttık
+        timeout.tv_usec = 500000; // 1.5 saniye
 
         FD_ZERO(&writefds);
         FD_SET(sock, &writefds);
@@ -112,14 +113,26 @@ public:
           socklen_t len = sizeof(error);
           if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len) == 0 &&
               error == 0) {
+            // Bağlantı başarılı, ama gerçekten açık mı kontrol et
+            char test_byte;
+            int peek_result =
+                recv(sock, &test_byte, 1, MSG_PEEK | MSG_DONTWAIT);
             close(sock);
-            return true;
+
+            // Eğer recv hata vermiyorsa veya EAGAIN/EWOULDBLOCK dönüyorsa port
+            // açık
+            return (peek_result >= 0 || errno == EAGAIN ||
+                    errno == EWOULDBLOCK);
           }
         }
       }
     } else {
+      // Anında bağlandı, ama gerçekten açık mı kontrol et
+      char test_byte;
+      int peek_result = recv(sock, &test_byte, 1, MSG_PEEK | MSG_DONTWAIT);
       close(sock);
-      return true;
+
+      return (peek_result >= 0 || errno == EAGAIN || errno == EWOULDBLOCK);
     }
 
     close(sock);
@@ -128,6 +141,7 @@ public:
 
   // UDP Scan (basit)
   bool udpScan(int port) {
+    // Normal UDP socket oluştur (Raw socket DEĞİL)
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
       return false;
@@ -162,12 +176,13 @@ public:
 
   // Banner Grabbing
   std::string grabBanner(int port) {
+    // Normal TCP socket oluştur (Raw socket DEĞİL)
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0)
       return "";
 
     struct timeval timeout;
-    timeout.tv_sec = 3;
+    timeout.tv_sec = 2; // Timeout'u azalttık
     timeout.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
@@ -183,30 +198,60 @@ public:
     }
 
     std::string banner = "";
+    char buffer[1024];
+    memset(buffer, 0, sizeof(buffer));
+    int bytes_received = 0;
 
     // Port'a göre özel istekler
     if (port == 80 || port == 8080) {
       send(sock, "HEAD / HTTP/1.0\r\n\r\n", 18, 0);
+      bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
     } else if (port == 443 || port == 8443) {
+      // SSL/TLS portları için özel kontrol
       banner = "HTTPS/SSL";
       close(sock);
       return banner;
     } else if (port == 22) {
       // SSH banner'ı otomatik gelir
+      bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+      if (bytes_received > 0 && strncmp(buffer, "SSH-", 4) == 0) {
+        banner = std::string(buffer);
+      }
     } else if (port == 21) {
       // FTP banner'ı otomatik gelir
+      bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+      if (bytes_received > 0 && strncmp(buffer, "220", 3) == 0) {
+        banner = std::string(buffer);
+      }
     } else if (port == 25) {
       // SMTP banner'ı otomatik gelir
+      bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+      if (bytes_received > 0 && strncmp(buffer, "220", 3) == 0) {
+        banner = std::string(buffer);
+      }
+    } else if (port == 110) {
+      // POP3 banner'ı
+      bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+      if (bytes_received > 0 && strncmp(buffer, "+OK", 3) == 0) {
+        banner = std::string(buffer);
+      }
+    } else if (port == 143) {
+      // IMAP banner'ı
+      bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+      if (bytes_received > 0 && strstr(buffer, "IMAP") != NULL) {
+        banner = std::string(buffer);
+      }
+    } else {
+      // Diğer portlar için genel banner okuma
+      bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+      if (bytes_received > 0) {
+        banner = std::string(buffer);
+      }
     }
-
-    char buffer[1024];
-    memset(buffer, 0, sizeof(buffer));
-    int bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
 
     close(sock);
 
-    if (bytes_received > 0) {
-      banner = std::string(buffer);
+    if (!banner.empty() && bytes_received > 0) {
       // Sadece ilk satırı al ve temizle
       size_t newline = banner.find('\n');
       if (newline != std::string::npos) {
@@ -225,12 +270,17 @@ public:
           ++it;
         }
       }
+
+      // Çok kısa banner'ları reddet
+      if (banner.length() < 3) {
+        banner = "";
+      }
     }
 
     return banner;
   }
 
-  // TTL ile basit OS tespiti
+  // TTL ile gelişmiş OS tespiti
   void detectOSByTTL() {
     // Ping ile TTL değerini al
     std::string ping_cmd = "ping -c 1 -W 2000 " + target_ip +
@@ -251,15 +301,70 @@ public:
       if (ttl_pos != std::string::npos) {
         int ttl = std::stoi(result.substr(ttl_pos + 4, 3));
 
-        if (ttl >= 60 && ttl <= 64) {
+        // Gelişmiş OS tespiti - hop analizi ile
+        int original_ttl = 0;
+        int hops = 0;
+
+        // Orijinal TTL değerini tahmin et
+        if (ttl <= 64) {
+          original_ttl = 64;
+          hops = 64 - ttl;
+        } else if (ttl <= 128) {
+          original_ttl = 128;
+          hops = 128 - ttl;
+        } else if (ttl <= 255) {
+          original_ttl = 255;
+          hops = 255 - ttl;
+        }
+
+        if (original_ttl == 64) {
           detected_os = "Linux/Unix (TTL: " + std::to_string(ttl) + ")";
-        } else if (ttl >= 120 && ttl <= 128) {
+          if (hops == 0)
+            detected_os += " - Doğrudan bağlantı";
+          else if (hops <= 5)
+            detected_os += " - Yakın (" + std::to_string(hops) + " hop)";
+          else if (hops <= 15)
+            detected_os += " - Orta mesafe (" + std::to_string(hops) + " hop)";
+          else
+            detected_os += " - Uzak (" + std::to_string(hops) + " hop)";
+        } else if (original_ttl == 128) {
           detected_os = "Windows (TTL: " + std::to_string(ttl) + ")";
-        } else if (ttl >= 250 && ttl <= 255) {
+          if (hops == 0)
+            detected_os += " - Doğrudan bağlantı";
+          else if (hops <= 5)
+            detected_os += " - Yakın (" + std::to_string(hops) + " hop)";
+          else if (hops <= 15)
+            detected_os += " - Orta mesafe (" + std::to_string(hops) + " hop)";
+          else
+            detected_os += " - Uzak (" + std::to_string(hops) + " hop)";
+        } else if (original_ttl == 255) {
           detected_os =
               "Cisco/Network Device (TTL: " + std::to_string(ttl) + ")";
+          if (hops == 0)
+            detected_os += " - Doğrudan bağlantı";
+          else
+            detected_os += " - " + std::to_string(hops) + " hop uzaklıkta";
         } else {
-          detected_os = "Unknown OS (TTL: " + std::to_string(ttl) + ")";
+          // Çok düşük TTL değerleri için özel analiz
+          if (ttl >= 1 && ttl <= 10) {
+            detected_os =
+                "Proxy/Load Balancer (TTL: " + std::to_string(ttl) + ")";
+          } else if (ttl >= 11 && ttl <= 30) {
+            detected_os = "Çok uzak Linux/Unix (TTL: " + std::to_string(ttl) +
+                          ") - 30+ hop";
+          } else if (ttl >= 31 && ttl <= 50) {
+            detected_os = "Uzak Linux/Unix (TTL: " + std::to_string(ttl) +
+                          ") - 15-30 hop";
+          } else if (ttl >= 51 && ttl <= 80) {
+            detected_os =
+                "Orta mesafe Linux/Unix (TTL: " + std::to_string(ttl) +
+                ") - 10-15 hop";
+          } else if (ttl >= 81 && ttl <= 110) {
+            detected_os =
+                "Uzak Windows (TTL: " + std::to_string(ttl) + ") - 15-45 hop";
+          } else {
+            detected_os = "Bilinmeyen OS (TTL: " + std::to_string(ttl) + ")";
+          }
         }
       }
     }
@@ -279,8 +384,9 @@ public:
       is_open = true;
       scan_method = "TCP";
     }
+
     // UDP Scan dene (sadece belirli portlar için)
-    else if (port == 53 || port == 161 || port == 123 || port == 69) {
+    if (!is_open && (port == 53 || port == 161 || port == 123 || port == 69)) {
       if (udpScan(port)) {
         is_open = true;
         scan_method = "UDP";
@@ -288,13 +394,14 @@ public:
     }
 
     if (is_open) {
-      std::lock_guard<std::mutex> lock(result_mutex);
-      open_ports[port] = scan_method;
-
       // Servis tespiti
       std::string service = "";
+      bool service_identified = false;
+
+      // Önce bilinen servis portlarını kontrol et
       if (known_services.find(port) != known_services.end()) {
         service = known_services[port];
+        service_identified = true;
       }
 
       // Banner grabbing (sadece TCP portları için)
@@ -306,10 +413,17 @@ public:
           } else {
             service = banner;
           }
+          service_identified = true;
         }
       }
 
-      services[port] = service.empty() ? "Unknown" : service;
+      // Sadece servis tespit edilebildiyse kaydet
+      if (service_identified) {
+        std::lock_guard<std::mutex> lock(result_mutex);
+        open_ports[port] = scan_method;
+        services[port] = service;
+        std::cout << "Port " << port << " açık: " << service << std::endl;
+      }
     }
   }
 
@@ -326,15 +440,51 @@ public:
               << std::endl;
     std::cout << "Hedef: " << target_ip << std::endl;
     std::cout << "Taranacak port sayısı: " << ports.size() << std::endl;
-    std::cout << "Tarama başlatılıyor...\n" << std::endl;
+
+    std::cout
+        << "\n╔════════════════════════════════════════════════════════════"
+           "══════════════════╗"
+        << std::endl;
+    std::cout << "║                          TEKNİK RAPOR                      "
+                 "                 ║"
+              << std::endl;
+    std::cout << "╠════════════════════════════════════════════════════════════"
+                 "══════════════════╣"
+              << std::endl;
+    std::cout << "║ Raw Socket Kullanımı: HAYIR (Normal Socket kullanılıyor)   "
+                 "                 ║"
+              << std::endl;
+    std::cout << "║ Tarama Yöntemleri:                                         "
+                 "                 ║"
+              << std::endl;
+    std::cout << "║   • TCP Connect Scan (AF_INET, SOCK_STREAM)                "
+                 "                 ║"
+              << std::endl;
+    std::cout << "║   • UDP Scan (AF_INET, SOCK_DGRAM) - Seçili portlar        "
+                 "                 ║"
+              << std::endl;
+    std::cout << "║ Thread Sayısı: 100 eşzamanlı bağlantı                      "
+                 "                 ║"
+              << std::endl;
+    std::cout << "║ Timeout: TCP=2sn, UDP=1sn                                  "
+                 "                 ║"
+              << std::endl;
+    std::cout << "╚════════════════════════════════════════════════════════════"
+                 "══════════════════╝"
+              << std::endl;
+
+    std::cout << "\nTarama başlatılıyor...\n" << std::endl;
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
     // OS tespiti
-    std::cout << "İşletim sistemi tespiti yapılıyor..." << std::endl;
+    std::cout << "OS tespiti yapılıyor..." << std::endl;
     detectOSByTTL();
+    std::cout << "Tespit edilen OS: " << detected_os << std::endl;
 
     // Multi-threaded tarama
+    std::cout << "\nPort tarama başlatılıyor..." << std::endl;
+
     std::vector<std::thread> threads;
     const int max_threads = 100;
 
@@ -350,17 +500,37 @@ public:
       }
 
       // İlerleme göster
-      std::cout << "\rTarama ilerlemesi: "
+      std::cout << "Tarama ilerlemesi: "
                 << std::min(i + max_threads, ports.size()) << "/"
-                << ports.size() << " port" << std::flush;
+                << ports.size() << " port" << std::endl;
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration =
         std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
 
-    std::cout << "\nTarama tamamlandı! Süre: " << duration.count()
-              << " saniye\n"
+    std::cout
+        << "\n╔════════════════════════════════════════════════════════════"
+           "══════════════════╗"
+        << std::endl;
+    std::cout << "║                          TARAMA ÖZETI                      "
+                 "                 ║"
+              << std::endl;
+    std::cout << "╠════════════════════════════════════════════════════════════"
+                 "══════════════════╣"
+              << std::endl;
+    std::cout << "║ Toplam tarama süresi: " << std::left << std::setw(48)
+              << (std::to_string(duration.count()) + " saniye") << "║"
+              << std::endl;
+    std::cout << "║ Taranan port sayısı: " << std::left << std::setw(49)
+              << ports.size() << "║" << std::endl;
+    std::cout << "║ Tespit edilen açık port: " << std::left << std::setw(45)
+              << open_ports.size() << "║" << std::endl;
+    std::cout << "║ Kullanılan yöntem: Normal Socket (Raw Socket DEĞİL)        "
+                 "                 ║"
+              << std::endl;
+    std::cout << "╚════════════════════════════════════════════════════════════"
+                 "══════════════════╝"
               << std::endl;
   }
 
